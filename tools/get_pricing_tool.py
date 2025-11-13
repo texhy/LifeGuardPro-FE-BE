@@ -4,7 +4,8 @@ Pricing Lookup Tool for Agent
 Confidence: 95% ✅
 
 Features:
-- Fuzzy course name matching (ILIKE)
+- Multi-source course matching (aliases, titles, slugs, SKUs)
+- Intelligent disambiguation for ambiguous queries
 - Individual pricing (quantity=1)
 - Group tiered pricing (quantity>=2)
 - Shows both 4A and 4B options
@@ -15,7 +16,7 @@ from config.database import get_connection
 from typing import Optional
 
 @tool
-async def get_pricing(course_name: str, quantity: int = 1) -> str:
+async def get_pricing(course_name: str, quantity: int = 1, buyer_category: Optional[str] = None) -> str:
     """
     Get pricing information for a LifeGuard-Pro course.
     
@@ -30,6 +31,7 @@ async def get_pricing(course_name: str, quantity: int = 1) -> str:
         quantity: Number of students (default: 1)
             - 1 = individual pricing
             - 2+ = group pricing (shows all applicable tiers)
+        buyer_category: "individual" or "employer_or_instructor" (optional, auto-detected from quantity if not provided)
     
     Returns:
         str: Formatted pricing information with options
@@ -44,42 +46,76 @@ async def get_pricing(course_name: str, quantity: int = 1) -> str:
     try:
         print(f"💰 Pricing Tool: Looking up '{course_name}' for {quantity} student(s)")
         
+        # Determine buyer_category if not provided
+        if not buyer_category:
+            buyer_category = "individual" if quantity == 1 else "employer_or_instructor"
+        
+        # ================================================================
+        # 1. FIND COURSE (using intelligent multi-source matcher)
+        # ================================================================
+        from utils.course_matcher import match_course_with_disambiguation
+        from utils.disambiguation_generator import generate_disambiguation_message
+        
+        match_result = match_course_with_disambiguation(
+            query=course_name,
+            buyer_category=buyer_category,
+            require_single_match=True  # Need exact match for pricing
+        )
+        
+        # Check if disambiguation needed
+        if match_result["needs_disambiguation"]:
+            print(f"  ❓ Multiple courses found ({match_result['total_matches']} matches), generating disambiguation...")
+            
+            # Generate LLM-based disambiguation message
+            disambiguation_msg = await generate_disambiguation_message(
+                user_query=course_name,
+                matches_by_program=match_result["matches_by_program"],
+                buyer_category=buyer_category
+            )
+            
+            return disambiguation_msg
+        
+        # No match found
+        if not match_result["success"] or not match_result["best_match"]:
+            return f"❌ Course not found: '{course_name}'\n\nTry: 'Lifeguard', 'CPR', 'First Aid', 'Water Safety', etc.\n\nTip: Use rag_search to explore available courses first!"
+        
+        # Got single match - use it
+        best_match = match_result["best_match"]
+        course_id = best_match["course_id"]
+        course_title = best_match["canonical_title"]
+        course_sku = best_match.get("sku") or 'N/A'
+        
+        print(f"  ✅ Matched: {course_title} (score: {best_match['match_score']:.2f}, SKU: {course_sku})")
+        
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # ================================================================
-                # 1. FIND COURSE (fuzzy match on title or SKU)
-                # ================================================================
+                # Get parent program and related courses (all courses in same program)
+                # First get parent program info
                 cur.execute("""
-                    SELECT course_id, title, sku, slug
-                    FROM courses
-                    WHERE active = true
-                      AND (title ILIKE %s OR sku ILIKE %s OR slug ILIKE %s)
-                    ORDER BY 
-                        CASE 
-                            WHEN title ILIKE %s THEN 1  -- Exact match first
-                            WHEN title ILIKE %s THEN 2  -- Starts with
-                            ELSE 3                       -- Contains
-                        END,
-                        title
+                    SELECT p.title as program_title, p.slug as program_slug
+                    FROM programs p
+                    JOIN courses c ON c.program_id = p.program_id
+                    WHERE c.course_id = %s
                     LIMIT 1
-                """, (
-                    f"%{course_name}%",
-                    f"%{course_name}%",
-                    f"%{course_name}%",
-                    course_name,
-                    f"{course_name}%"
-                ))
+                """, (course_id,))
                 
-                course = cur.fetchone()
+                parent_program = cur.fetchone()
                 
-                if not course:
-                    return f"❌ Course not found: '{course_name}'\n\nTry: 'Lifeguard', 'CPR', 'First Aid', 'Water Safety', etc.\n\nTip: Use rag_search to explore available courses first!"
+                # Then get all other courses in the same parent program
+                cur.execute("""
+                    SELECT 
+                        c.course_id,
+                        c.title as course_title,
+                        c.slug as course_slug,
+                        c.short_title
+                    FROM courses c
+                    WHERE c.program_id = (SELECT program_id FROM courses WHERE course_id = %s)
+                      AND c.active = true
+                      AND c.course_id != %s
+                    ORDER BY c.title
+                """, (course_id, course_id))
                 
-                course_id = course['course_id']
-                course_title = course['title']
-                course_sku = course['sku'] or 'N/A'
-                
-                print(f"  ✅ Found: {course_title} (SKU: {course_sku})")
+                related_courses = cur.fetchall()
                 
                 # ================================================================
                 # 2. GET PRICING BASED ON QUANTITY
@@ -110,10 +146,54 @@ SKU: {course_sku}
 
 📚 **To Register:** Use rag_search to find registration links and course details."""
                         
+                        # Add related courses info if available
+                        if parent_program and related_courses:
+                            result += f"""
+
+---
+
+📋 **Related Courses in {parent_program['program_title']}:**
+
+"""
+                            for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
+                                result += f"{idx}. **{rel_course['course_title']}**"
+                                if rel_course.get('short_title'):
+                                    result += f" ({rel_course['short_title']})"
+                                result += "\n"
+                            
+                            if len(related_courses) > 10:
+                                result += f"\n_... and {len(related_courses) - 10} more courses in this program_"
+                            
+                            result += f"\n💡 Ask me about pricing or details for any of these courses!"
+                        
                         print(f"  ✅ Individual price: ${price['unit_price']:.2f}")
+                        if related_courses:
+                            print(f"  📋 Found {len(related_courses)} related courses in parent program")
                         return result
                     else:
-                        return f"⚠️  No current individual pricing available for **{course_title}**\n\nPlease contact LifeGuard-Pro for pricing information."
+                        error_msg = f"⚠️  No current individual pricing available for **{course_title}**\n\nPlease contact LifeGuard-Pro for pricing information."
+                        
+                        # Add related courses info even for errors
+                        if parent_program and related_courses:
+                            error_msg += f"""
+
+---
+
+📋 **Related Courses in {parent_program['program_title']}:**
+
+"""
+                            for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
+                                error_msg += f"{idx}. **{rel_course['course_title']}**"
+                                if rel_course.get('short_title'):
+                                    error_msg += f" ({rel_course['short_title']})"
+                                error_msg += "\n"
+                            
+                            if len(related_courses) > 10:
+                                error_msg += f"\n_... and {len(related_courses) - 10} more courses in this program_"
+                            
+                            error_msg += f"\n💡 Ask me about pricing or details for any of these courses!"
+                        
+                        return error_msg
                 
                 else:
                     # GROUP PRICING (tiered)
@@ -170,7 +250,29 @@ SKU: {course_sku}
                         
                         result += f"📚 **To Register:** Use rag_search to find registration details and course information."
                         
+                        # Add related courses info if available
+                        if parent_program and related_courses:
+                            result += f"""
+
+---
+
+📋 **Related Courses in {parent_program['program_title']}:**
+
+"""
+                            for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
+                                result += f"{idx}. **{rel_course['course_title']}**"
+                                if rel_course.get('short_title'):
+                                    result += f" ({rel_course['short_title']})"
+                                result += "\n"
+                            
+                            if len(related_courses) > 10:
+                                result += f"\n_... and {len(related_courses) - 10} more courses in this program_"
+                            
+                            result += f"\n💡 Ask me about pricing or details for any of these courses!"
+                        
                         print(f"  ✅ Found {len(matching_tiers)} pricing tier(s) for {quantity} students")
+                        if related_courses:
+                            print(f"  📋 Found {len(related_courses)} related courses in parent program")
                         return result
                     else:
                         # No matching tier, show all available tiers

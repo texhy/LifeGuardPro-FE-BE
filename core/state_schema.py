@@ -91,6 +91,16 @@ class RAGSlots(TypedDict, total=False):
     keywords: Optional[List[str]]  # Extracted keywords
 
 
+class AllServicesSlots(TypedDict, total=False):
+    """
+    Slots for get_all_services intent
+    
+    Optional:
+    - buyer_category: str  # "individual" or "employer_or_instructor"
+    """
+    buyer_category: Optional[str]
+
+
 class QuoteSlots(TypedDict, total=False):
     """
     Slots for quote/email intent
@@ -181,6 +191,7 @@ class ConversationState(TypedDict, total=False):
     # Slots for each intent
     pricing_slots: PricingSlots
     rag_slots: RAGSlots
+    all_services_slots: AllServicesSlots
     quote_slots: QuoteSlots
     booking_slots: BookingSlots
     
@@ -265,6 +276,7 @@ def create_empty_state() -> ConversationState:
         
         "pricing_slots": {},
         "rag_slots": {},
+        "all_services_slots": {},
         "quote_slots": {},
         "booking_slots": {},
         "planned_calls": [],
@@ -400,6 +412,14 @@ def merge_planner_output(
             if v is not None:
                 rs[k] = v
         new_state["rag_slots"] = rs
+    
+    # Update all services slots
+    if "all_services_slots" in planner_output:
+        ass = new_state.get("all_services_slots", {})
+        for k, v in planner_output["all_services_slots"].items():
+            if v is not None:
+                ass[k] = v
+        new_state["all_services_slots"] = ass
     
     # Update quote slots
     if "quote_slots" in planner_output:

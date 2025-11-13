@@ -28,21 +28,43 @@ class ChatServiceWithContext:
         
         # Check if returning user and get past summaries
         past_context = ""
+        print(f"\n🔍 CONTEXT INJECTION DEBUG:")
+        print(f"  → is_returning: {session_data.get('is_returning')}")
+        print(f"  → user_id: {session_data.get('user_id')}")
+        
         if session_data.get("is_returning") and session_data.get("user_id"):
             past_summaries = await self.summary_service.get_user_past_summaries(
                 user_id=session_data["user_id"],
                 limit=3
             )
             
+            print(f"  → Found {len(past_summaries)} past summaries")
+            if past_summaries:
+                for i, summary in enumerate(past_summaries, 1):
+                    print(f"    Summary {i}: {summary.get('summary', '')[:100]}...")
+            
             if past_summaries:
                 past_context = self.summary_service.format_past_summaries_for_context(past_summaries)
+                print(f"  → Formatted context length: {len(past_context)} chars")
         
         # Build messages list with context injection
         messages_list = session_data["messages"].copy()
         
+        print(f"  → Current messages in session: {len(messages_list)}")
+        print(f"  → Message types: {[msg.type if hasattr(msg, 'type') else 'unknown' for msg in messages_list]}")
+        
         # If returning user with past context, inject it before the first user message
-        # This only happens on the first message of the NEW session
-        if past_context and len(messages_list) == 0:
+        # Check if context was already injected by looking for a SystemMessage
+        # (SystemMessage type is "system" in LangChain)
+        has_context = any(
+            hasattr(msg, 'type') and msg.type == "system" 
+            for msg in messages_list
+        )
+        
+        print(f"  → Has context already: {has_context}")
+        print(f"  → Past context exists: {bool(past_context)}")
+        
+        if past_context and not has_context:
             # Add system message with past context
             context_message = SystemMessage(content=f"""CONTEXT: This user has chatted before. Here's their conversation history:
 
@@ -51,6 +73,12 @@ class ChatServiceWithContext:
 Use this context to provide personalized service. Reference past discussions when relevant, but don't be overly familiar.
 """)
             messages_list.append(context_message)
+            print(f"  ✅ Context SystemMessage injected!")
+        else:
+            if not past_context:
+                print(f"  ⚠️  No past context to inject")
+            if has_context:
+                print(f"  ℹ️  Context already exists in messages")
         
         # Add current user message
         messages_list.append(HumanMessage(content=message.message))
@@ -113,9 +141,12 @@ Use this context to provide personalized service. Reference past discussions whe
         )
         
         # Save updated session (messages)
+        messages_to_save = result.get("messages", [])
+        print(f"🔍 DEBUG: Saving {len(messages_to_save)} messages to DB")
+        print(f"🔍 DEBUG: Message types: {[msg.type if hasattr(msg, 'type') else 'unknown' for msg in messages_to_save]}")
         await self.session_service.update_session(
             message.session_id,
-            messages=result.get("messages", []),
+            messages=messages_to_save,
             user_name=result.get("user_name"),
             user_email=result.get("user_email"),
             user_phone=result.get("user_phone")

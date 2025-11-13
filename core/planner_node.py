@@ -51,12 +51,15 @@ PLANNER_SYSTEM_PROMPT = """You are a deterministic planner for LifeGuard-Pro cha
 - "pricing": User asks about costs, prices, "how much"
 - "quote": User wants email quote with payment links (requires pricing first)
 - "booking": User wants to schedule a meeting/consultation
-- "general_chat": Conversational queries (greetings, meta-questions, chitchat, conversation history)
+- "get_all_services": User asks for complete list of all services/courses (NEW)
+- "general_chat": Conversational queries (greetings, meta-questions, chitchat, what was my last question?)
 
 **Intent Detection Rules:**
 - Multi-intent is ALLOWED (e.g., ["pricing", "rag"])
 - Provide confidence scores (0.0-1.0) for each intent
 - If confidence < 0.6, mark next_action="NONE" and explain in notes
+- "get_all_services" for: "what services", "all services", "what do you offer", "complete list", "everything you have"
+- "get_all_services" queries should ask for buyer_category if not provided (individual vs group)
 - "general_chat" for: greetings (hi, hello), meta-questions (what did I ask), thanks, chitchat
 - "general_chat" queries about conversation history (e.g., "what was my last question") → NO tools needed
 
@@ -116,6 +119,11 @@ If query_type is "comparison", extract:
 - price_option: "published" (default)
 - published_variant: null (user can choose 4A/4B later)
 
+**All Services Slots (required for get_all_services):**
+- buyer_category: "individual" OR "employer_or_instructor" (OPTIONAL but recommended)
+  * If missing, set preconditions_met=false and ask for it
+  * Helps show audience-specific course names
+
 **RAG Slots (required for rag_search):**
 - query: the actual search query text
 
@@ -147,9 +155,31 @@ IF intent is "general_chat":
   execute = false  # Responder will handle directly
 
 ELIF any planned_call has preconditions_met=false:
-  next_action = "ASK_SLOT"
-  slot_question = "Clear, single question to fill first missing slot"
-  execute = false  # Can't execute without all info
+  # Check what's missing
+  missing_slots = planned_call.get("missing", [])
+  tool_name = planned_call.get("tool")
+  
+  # Special handling for get_all_services - ask for buyer_category
+  if tool_name == "get_all_services" and "buyer_category" in missing_slots:
+    next_action = "ASK_SLOT"
+    slot_question = "Are you looking for individual training or group/organization training? This helps me show you the most relevant options!"
+    execute = false
+  # If ONLY course_slug is missing (ambiguous query), let executor handle disambiguation
+  # But if buyer_category is also missing, ask for that first
+  elif "buyer_category" in missing_slots:
+    next_action = "ASK_SLOT"
+    slot_question = "Are you buying for yourself (individual) or for a group/organization?"
+    execute = false
+  elif "course_slug" in missing_slots and len(missing_slots) == 1:
+    # Ambiguous course query - let executor handle disambiguation
+    # Set course_title to user's query, executor will find matches
+    next_action = "READY"
+    slot_question = null
+    execute = true  # Executor will detect ambiguity and return disambiguation
+  else:
+    next_action = "ASK_SLOT"
+    slot_question = "Clear, single question to fill first missing slot"
+    execute = false  # Can't execute without all info
 
 ELIF all planned_calls have preconditions_met=true:
   next_action = "READY"
@@ -219,7 +249,7 @@ OUTPUT:
   "process_domain": null,
   "pricing_slots": {},
   "rag_slots": {
-    "query": "CPR training courses",
+    "query": "Tell me about CPR",
     "topic": "course_info"
   },
   "quote_slots": {},
@@ -227,7 +257,7 @@ OUTPUT:
   "planned_calls": [
     {
       "tool": "rag_search",
-      "args": {"query": "CPR training courses"},
+      "args": {"query": "Tell me about CPR"},
       "preconditions_met": true,
       "missing": [],
       "execute": true,
@@ -361,11 +391,11 @@ OUTPUT:
   "comparison_items": [],
   "process_domain": null,
   "pricing_slots": {
-    "buyer_category": null,
+    "buyer_category": "individual",  # Infer from context (default to individual)
     "course_slug": null,
-    "course_title": null,
-    "course_variant_ok": false,
-    "quantity": null,
+    "course_title": "lifeguard training",  # Pass user's query to executor
+    "course_variant_ok": false,  # Ambiguous - executor will handle disambiguation
+    "quantity": 1,
     "price_option": "published"
   },
   "rag_slots": {},
@@ -374,16 +404,47 @@ OUTPUT:
   "planned_calls": [
     {
       "tool": "get_pricing",
+      "args": {"course_name": "lifeguard training", "quantity": 1, "buyer_category": "individual"},
+      "preconditions_met": true,  # Has enough info to try matching
+      "missing": [],
+      "execute": true,  # Execute - pricing tool will handle disambiguation if needed
+      "priority": 0
+    }
+  ],
+  "next_action": "READY",
+  "slot_question": null,
+  "notes": ["Ambiguous course query - executor will handle disambiguation"]
+}
+
+INPUT: "What are all your services?"
+OUTPUT:
+{
+  "intents": ["get_all_services"],
+  "intent_confidence": {"get_all_services": 0.95},
+  "query_type": "broad_general",
+  "user_context": {},
+  "comparison_items": [],
+  "process_domain": null,
+  "pricing_slots": {},
+  "rag_slots": {},
+  "quote_slots": {},
+  "booking_slots": {},
+  "all_services_slots": {
+    "buyer_category": null  # Missing - should ask
+  },
+  "planned_calls": [
+    {
+      "tool": "get_all_services",
       "args": {},
-      "preconditions_met": false,
-      "missing": ["course_slug", "buyer_category"],
+      "preconditions_met": false,  # buyer_category missing but optional
+      "missing": ["buyer_category"],
       "execute": false,
       "priority": 0
     }
   ],
   "next_action": "ASK_SLOT",
-  "slot_question": "Which specific lifeguard course would you like pricing for? We offer Junior Lifeguard, Shallow Pool (5 ft), Swimming Pool (12 ft), Deep Pool (20 ft), Waterfront, and Water Park lifeguard training.",
-  "notes": ["Too vague - need specific course"]
+  "slot_question": "Are you looking for individual training or group/organization training? This helps me show you the most relevant options!",
+  "notes": ["All services query - asking for buyer_category to show relevant courses"]
 }
 
 **COURSE REFERENCE GUIDE:**
@@ -399,8 +460,8 @@ OUTPUT:
 **CRITICAL RULES:**
 1. Output ONLY valid JSON (no markdown, no prose)
 2. **ALWAYS include these fields: intents, intent_confidence, query_type, user_context, comparison_items, process_domain**
-3. **PHASE 2: Set execute=true when preconditions_met=true** (tools will actually run!)
-4. Set execute=false only when preconditions_met=false (missing info)
+3. Set execute=true when preconditions_met=true** 
+4. Set execute=false only when preconditions_met=false (indicatesmissing info)
 5. Never invent prices or data
 6. If unsure about course name, set course_variant_ok=false and ask
 7. One slot_question at a time
@@ -423,7 +484,7 @@ PLANNER_SYSTEM_PROMPT = escaped_prompt.format(COURSE_METADATA=escaped_course_met
 # Initialize planner LLM (separate from agent)
 planner_llm = ChatOpenAI(
     model="gpt-4o",  # Use GPT-4 for better JSON adherence
-    temperature=0,    # Deterministic
+    temperature=0.5,    # logical and creative
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
@@ -443,7 +504,7 @@ async def call_planner(
     Args:
         user_message: Latest user query
         current_state: Current ConversationState
-        conversation_history: Recent message history (optional)
+        conversation_history: Recent message history (if available)
         
     Returns:
         Planner output (JSON dict) or fallback on error
@@ -591,7 +652,7 @@ def validate_planner_output(plan: Dict[str, Any]) -> tuple:
         if not isinstance(plan["planned_calls"], list):
             errors.append("planned_calls must be a list")
         else:
-            valid_tools = ["rag_search", "get_pricing", "quote_send_email", "book_meeting"]
+            valid_tools = ["rag_search", "get_pricing", "get_all_services", "quote_send_email", "book_meeting"]
             
             # For general_chat, empty planned_calls is OK - skip validation
             if plan.get("intents") == ["general_chat"] and not plan.get("planned_calls"):

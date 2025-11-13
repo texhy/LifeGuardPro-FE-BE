@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from config.database import get_connection
 from services.user_service import UserService
 from services.summary_service import SummaryService
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 import json
 import uuid
 
@@ -145,6 +145,8 @@ class SessionServiceDB:
                         messages.append(HumanMessage(content=content))
                     elif msg_row['role'] == 'assistant':
                         messages.append(AIMessage(content=content))
+                    elif msg_row['role'] == 'system':
+                        messages.append(SystemMessage(content=content))
                 
                 return {
                     "session_id": session_id,
@@ -212,9 +214,16 @@ class SessionServiceDB:
                     # Only store NEW messages (messages added since last update)
                     new_messages = messages[existing_count:]
                     
+                    print(f"🔍 DEBUG: Total messages: {len(messages)}, existing: {existing_count}, new: {len(new_messages)}")
+                    
                     for msg in new_messages:
                         if hasattr(msg, 'type'):
-                            role = 'user' if msg.type == 'human' else 'assistant'
+                            if msg.type == 'human':
+                                role = 'user'
+                            elif msg.type == 'system':
+                                role = 'system'
+                            else:  # ai or other
+                                role = 'assistant'
                             content = msg.content if hasattr(msg, 'content') else str(msg)
                         else:
                             role = 'assistant'
@@ -233,14 +242,15 @@ class SessionServiceDB:
         """
         End session and generate summary
         
-        1. Mark session as ended
-        2. Generate session summary
-        3. Create embedding for summary
-        4. Store in session_summaries table
+        1. Check if already ended (prevent duplicate processing)
+        2. Mark session as ended
+        3. Generate session summary (with cumulative context if summary exists)
+        4. Create embedding for summary
+        5. Store in session_summaries table
         """
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Get session and messages
+                # Get session and messages (ONLY active sessions)
                 cur.execute("""
                     SELECT id, user_id, started_at
                     FROM sessions
@@ -249,7 +259,8 @@ class SessionServiceDB:
                 
                 session = cur.fetchone()
                 if not session:
-                    return
+                    # Session doesn't exist or already ended
+                    return None
                 
                 db_session_id = str(session['id'])
                 

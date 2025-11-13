@@ -22,6 +22,7 @@ from core.rag_executor import execute_rag_search
 
 # Import actual tools for execution
 from tools.get_pricing_tool import get_pricing
+from tools.get_all_services_tool import get_all_services
 from tools.book_meeting_tool import book_meeting
 from tools.quote_send_email_tool import quote_send_email
 
@@ -35,11 +36,11 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
     Execute pricing tool - Looks up course pricing in database
     
     Args:
-        args: {course_name: str, quantity: int}
+        args: {course_name: str, quantity: int, buyer_category: str (optional)}
         state: Current conversation state
         
     Returns:
-        {success: bool, data: str, error: str}
+        {success: bool, data: str, error: str, needs_disambiguation: bool}
     """
     try:
         print(f"  💰 Calling get_pricing tool...")
@@ -47,6 +48,15 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
         # Extract arguments (support both 'course_name' and 'course' keys)
         course_name = args.get("course_name") or args.get("course")
         quantity = args.get("quantity", 1)
+        
+        # Get buyer_category from args, state, or infer from quantity
+        buyer_category = args.get("buyer_category")
+        if not buyer_category:
+            # Try to get from state pricing_slots
+            buyer_category = state.get("pricing_slots", {}).get("buyer_category")
+        if not buyer_category:
+            # Infer from quantity
+            buyer_category = "individual" if quantity == 1 else "employer_or_instructor"
         
         # Validate required arguments
         if not course_name:
@@ -67,15 +77,34 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
         # Call the actual tool
         result = await get_pricing.ainvoke({
             "course_name": course_name,
-            "quantity": quantity
+            "quantity": quantity,
+            "buyer_category": buyer_category
         })
         
+        # Check if result is a disambiguation message (contains emoji or specific patterns)
+        # Also check if it's actual pricing (has $ or 💰 emoji)
+        has_pricing = "$" in result or "💰" in result
+        needs_disambiguation = (
+            ("❓" in result or 
+             "multiple courses" in result.lower() or
+             "which one" in result.lower() or
+             "options" in result.lower()) 
+            and not has_pricing  # If it has pricing, it's not disambiguation
+        )
+        
         print(f"  ✅ Pricing tool returned: {len(result)} characters")
+        print(f"     Has pricing markers: ${has_pricing} (${'$' in result}, 💰{'💰' in result})")
+        
+        if needs_disambiguation:
+            print(f"  ❓ Disambiguation needed - returning suggestions to user")
+        elif has_pricing:
+            print(f"  💰 Pricing found in result - marking as success")
         
         return {
-            "success": True,
-            "data": result,  # Formatted pricing string from tool
-            "error": None
+            "success": has_pricing or (not needs_disambiguation and not result.startswith("❌")),  # Success if has pricing or not error
+            "data": result,  # Formatted pricing string or disambiguation message
+            "error": None if (has_pricing or not result.startswith("❌")) else "Pricing lookup failed",
+            "needs_disambiguation": needs_disambiguation
         }
         
     except Exception as e:
@@ -86,6 +115,53 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
             "success": False,
             "data": None,
             "error": f"Pricing lookup failed: {str(e)}"
+        }
+
+
+async def execute_all_services(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute get_all_services tool - Retrieves ALL services hierarchically
+    
+    Args:
+        args: {buyer_category: str (optional)}
+        state: Current conversation state
+        
+    Returns:
+        {success: bool, data: str, error: str}
+    """
+    try:
+        print(f"  📋 Calling get_all_services tool...")
+        
+        # Get buyer_category from args, state, or use None
+        buyer_category = args.get("buyer_category")
+        if not buyer_category:
+            # Try to get from state pricing_slots
+            buyer_category = state.get("pricing_slots", {}).get("buyer_category")
+        if not buyer_category:
+            # Try to get from state all_services_slots
+            buyer_category = state.get("all_services_slots", {}).get("buyer_category")
+        
+        # Call the actual tool
+        result = await get_all_services.ainvoke({
+            "buyer_category": buyer_category
+        })
+        
+        print(f"  ✅ All services tool returned: {len(result)} characters")
+        
+        return {
+            "success": not result.startswith("❌"),  # Success if not error
+            "data": result,  # Formatted services list
+            "error": None if not result.startswith("❌") else "Failed to retrieve services"
+        }
+        
+    except Exception as e:
+        print(f"  ❌ All services tool error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "data": None,
+            "error": f"All services lookup failed: {str(e)}"
         }
 
 
@@ -279,7 +355,7 @@ async def executor_node(state: Dict[str, Any]) -> Dict[str, Any]:
     Execute planned tool calls
     
     This node:
-    1. Checks if execution should proceed (next_action == READY)
+    1. Checks if execution should proceed (next_action == DY)
     2. Gets all planned calls with execute=True
     3. Executes each tool in priority order
     4. Stores results in state.tool_results
@@ -364,12 +440,37 @@ async def executor_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 result = await execute_pricing(args, state)
                 tool_results["get_pricing"] = result
                 
+                # Debug logging
+                print(f"   📊 Pricing result details:")
+                print(f"      success: {result.get('success')}")
+                print(f"      needs_disambiguation: {result.get('needs_disambiguation')}")
+                print(f"      has_data: {bool(result.get('data'))}")
+                print(f"      data_length: {len(result.get('data', ''))}")
+                if result.get('data'):
+                    data_preview = result.get('data', '')[:100]
+                    print(f"      data_preview: {data_preview}...")
+                    print(f"      has_dollar: {'$' in result.get('data', '')}")
+                    print(f"      has_emoji: {'💰' in result.get('data', '')}")
+                
                 if result.get("success"):
                     print(f"   ✅ Success: Pricing retrieved")
+                elif result.get("needs_disambiguation"):
+                    print(f"   ❓ Disambiguation: {len(result.get('data', ''))} chars")
                 else:
                     error = result.get("error", "Unknown error")
-                    print(f"   ⚠️  Not implemented yet: {error}")
+                    print(f"   ❌ Failed: {error}")
                     execution_errors.append(f"get_pricing: {error}")
+            
+            elif tool_name == "get_all_services":
+                result = await execute_all_services(args, state)
+                tool_results["get_all_services"] = result
+                
+                if result.get("success"):
+                    print(f"   ✅ Success: All services retrieved ({len(result.get('data', ''))} chars)")
+                else:
+                    error = result.get("error", "Unknown error")
+                    print(f"   ❌ Failed: {error}")
+                    execution_errors.append(f"get_all_services: {error}")
             
             elif tool_name == "quote_send_email":
                 result = await execute_quote(args, state)

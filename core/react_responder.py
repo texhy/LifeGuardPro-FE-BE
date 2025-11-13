@@ -30,7 +30,7 @@ load_dotenv()
 # Initialize ReACT LLM
 react_llm = ChatOpenAI(
     model="gpt-4o",
-    temperature=0.3,  # Slightly creative but mostly factual
+    temperature=0.8,  # High creativity for natural, human-like, persuasive responses
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
@@ -124,9 +124,53 @@ def format_available_data(tool_results: Dict[str, Any]) -> str:
     
     # Pricing results
     pricing_result = tool_results.get("get_pricing")
-    if pricing_result and pricing_result.get("success"):
-        data_parts.append(f"""Pricing Results:
-{pricing_result.get('data', 'Pricing information available')}""")
+    if pricing_result:
+        if pricing_result.get("needs_disambiguation"):
+            # Disambiguation message - pass it through directly
+            data_parts.append(f"""Pricing Disambiguation Needed:
+{pricing_result.get('data', 'Multiple courses found')}
+
+The user needs to specify which exact course they want pricing for.""")
+        elif pricing_result.get("success"):
+            pricing_data = pricing_result.get('data', 'Pricing information available')
+            # Check if pricing data actually contains pricing (has $ or 💰)
+            if "$" in pricing_data or "💰" in pricing_data:
+                data_parts.append(f"""✅ PRICING RESULTS (VERIFIED - MUST PRESENT TO USER):
+
+{pricing_data}
+
+**CRITICAL:** The pricing tool successfully found pricing information. 
+The data above contains the exact price. 
+YOU MUST present this pricing to the user. 
+DO NOT say pricing is unavailable or that you need to check with customer service.
+START YOUR RESPONSE by showing the price.""")
+            else:
+                # Pricing tool was called but didn't return actual pricing
+                data_parts.append(f"""Pricing Lookup Attempted:
+The pricing tool was called but did not return pricing information.
+{pricing_data}""")
+        else:
+            # Pricing tool was called but failed
+            error_msg = pricing_result.get('error', 'Unknown error')
+            data_parts.append(f"""Pricing Lookup Attempted:
+The pricing tool was called but encountered an issue: {error_msg}
+Please inform the user that pricing lookup failed and suggest they contact LifeGuard-Pro directly.""")
+    
+    # All Services results
+    all_services_result = tool_results.get("get_all_services")
+    if all_services_result:
+        if all_services_result.get("success"):
+            services_data = all_services_result.get('data', 'Services information available')
+            data_parts.append(f"""All Services Catalog:
+{services_data}
+
+**CRITICAL:** This is a complete list of all services. Present it clearly and hierarchically to the user.
+Show the parent programs and their sub-courses with descriptions.""")
+        else:
+            error_msg = all_services_result.get('error', 'Unknown error')
+            data_parts.append(f"""Services Lookup Attempted:
+The all services tool was called but encountered an issue: {error_msg}
+Please inform the user that services lookup failed.""")
     
     # Quote results
     quote_result = tool_results.get("quote_send_email")
@@ -169,6 +213,9 @@ def format_conversation_history(messages: List[Any], max_exchanges: int = 3) -> 
             history_parts.append(f"User: {msg.content}")
         elif isinstance(msg, AIMessage):
             history_parts.append(f"Assistant: {msg.content}")
+        elif hasattr(msg, 'type') and msg.type == "system":
+            # CRITICAL: Include SystemMessage (contains past context for returning users)
+            history_parts.append(f"[CONTEXT]: {msg.content}")
     
     return "\n".join(history_parts)
 
@@ -211,7 +258,21 @@ def build_react_prompt(
     
     course_metadata = format_course_metadata_for_prompt()
     
-    prompt = f"""You are a helpful sales consultant for LifeGuard-Pro training.
+    prompt = f"""You are Sarah, a warm, friendly, and highly persuasive sales consultant for LifeGuard-Pro training. You're a woman who talks to customers like you're chatting with a close friend - natural, authentic, and genuinely helpful. Nobody should be able to tell you're an AI assistant; you sound completely human in every way.
+
+**YOUR PERSONALITY:**
+- Extremely friendly and warm - like talking to your best friend
+- Highly persuasive but never pushy - you understand emotions and connect genuinely
+- Creative in how you phrase responses - natural, conversational, human
+- Never robotic or formal - you're real, relatable, and empathetic
+- When you don't know something, you act like a human would: "Oh, I'm sorry! I think I wasn't informed about this by my colleagues. Let me check with them to see if there were any recent changes."
+- You never give up easily - if information is unclear, you ask clarifying questions with genuine interest
+
+**CONVERSATION STYLE:**
+- Talk like two friends chatting - use natural language, occasional friendly expressions
+- Show empathy and emotional intelligence - understand what the customer is feeling
+- Be persuasive through genuine connection, not sales tactics
+- Use warm, approachable language that feels personal, not corporate
 
 **COURSE CATALOG:**
 {course_metadata}
@@ -227,25 +288,54 @@ Query Type: {query_type}
 **AVAILABLE DATA:**
 {data_summary}
 
+**CRITICAL PRICING INSTRUCTIONS:**
+- If you see "✅ PRICING RESULTS (VERIFIED - MUST PRESENT TO USER)" in Available Data, 
+  YOU MUST present the pricing information to the user.
+- DO NOT say "pricing is not available" or "pricing information not found" when pricing data exists in Available Data.
+- When pricing is present, start your response by presenting the price clearly and prominently.
+- Use the exact pricing information from Available Data - do not paraphrase or say it's unavailable.
+
 **YOUR TASK:**
-1. **Analyze** what the user actually wants:
-   - Direct question → Give direct answer
-   - "Help me choose" → Ask clarifying questions
-   - User provides context (age/role) → Give personalized recommendation
-   - "Just give summary" → Be concise, don't ask questions
+1. **Analyze** what the user actually wants AND how they're feeling:
+   - Read between the lines - understand their emotions, concerns, excitement
+   - Direct question → Give direct answer, but make it personal and warm
+   - "Help me choose" → Ask thoughtful, friendly clarifying questions like a friend would
+   - User provides context → Give personalized recommendation with genuine enthusiasm
+   - Uncertain or vague → Ask follow-up questions with real interest, don't give up
+   - **Disambiguation needed** → Present options warmly, help them discover what's best
 
 2. **Generate Response** that:
-   - Uses ONLY information from Available Data
-   - Matches the user's intent (direct vs consultative)
-   - Is warm, professional, and persuasive
-   - Includes call-to-action when appropriate
+   - Sounds 100% human - like you're texting a friend, not a corporate chatbot
+   - Uses ONLY information from Available Data (but present it naturally, not robotically)
+   - **If pricing is in Available Data, present it clearly but naturally: "So the price for that is $X - that includes everything!"**
+   - **If disambiguation message is in Available Data, present it warmly like a helpful friend explaining options**
+   - **NEVER say "pricing not available" if pricing data exists in Available Data**
+   - Understands and responds to emotions - show empathy, excitement, genuine interest
+   - Is persuasive through authentic connection, not salesy language
+   - Uses natural, conversational language - like friends chatting, not business communication
+   - Includes gentle, friendly call-to-action when it feels natural
 
 **CRITICAL RULES:**
-- Never recommend recertification courses to first-time students
-- Match recommendations to user's age/physical ability/goals
-- If user says "just" or "simply" → Don't ask questions
-- If data is missing → Say so honestly
-- Be natural and conversational
+
+**WHEN DATA IS AVAILABLE:**
+- **PRICING RULE:** If "Pricing Results:" appears in Available Data, the pricing information IS available. Present it clearly and warmly - DO NOT say it's unavailable! Say it like a friend sharing good info: "Great news! That course is $X and it includes..."
+- **When pricing data exists:** Present it naturally and enthusiastically - include the course name, price, and details in a friendly way
+- Match recommendations to user's age/physical ability/goals - show you understand them personally
+- Never recommend recertification courses to first-time students - be helpful, not just informative
+
+**WHEN DATA IS MISSING OR UNCLEAR:**
+- **DON'T GIVE UP!** If information is unclear or missing, ask friendly follow-up questions with genuine interest
+- Be creative in asking for clarification - make it feel like you're helping, not interrogating
+- Examples: "Hmm, I want to make sure I give you the perfect option. Can you tell me a bit more about what you're looking for?" or "That's a great question! To help you best, what specifically are you hoping to do with this course?"
+- If you truly can't find something after asking: Act like a human who needs to check with colleagues: "Oh, I'm so sorry! I think I wasn't informed about this by my colleagues. Let me ask them if there were any recent changes, and I'll get back to you with the latest info. Can I help you with anything else while I check on that?"
+- **NEVER sound robotic or give generic "not found" responses - always act human!**
+
+**CONVERSATION STYLE:**
+- If user says "just" or "simply" → Be concise but still warm and friendly - don't be pushy with questions
+- Always be natural and conversational - like two friends talking, never formal or corporate
+- Show genuine interest in helping them - your goal is to truly assist, not just sell
+- Use persuasive language naturally - through empathy, understanding, and authentic connection
+- Remember: Nobody should be able to tell you're an AI - you're Sarah, a real person helping a friend
 
 **Generate your response:**"""
 
@@ -292,8 +382,27 @@ async def react_responder_node(state: Dict[str, Any]) -> Dict[str, Any]:
     print(f"  → User Context: {user_context}")
     print(f"  → Tool Results: {list(tool_results.keys())}")
     
+    # Debug: Log pricing result details
+    if "get_pricing" in tool_results:
+        pricing_result = tool_results["get_pricing"]
+        print(f"  → Pricing Result:")
+        print(f"     success: {pricing_result.get('success')}")
+        print(f"     needs_disambiguation: {pricing_result.get('needs_disambiguation')}")
+        print(f"     has_data: {bool(pricing_result.get('data'))}")
+        if pricing_result.get('data'):
+            print(f"     data_preview: {pricing_result.get('data', '')[:150]}...")
+    
     # Format available data for LLM
     data_summary = format_available_data(tool_results)
+    
+    # Debug: Log what goes to LLM
+    print(f"  → Data Summary Length: {len(data_summary)} chars")
+    if "Pricing Results" in data_summary:
+        print(f"  → ✅ Pricing data included in summary")
+    elif "Pricing Disambiguation" in data_summary:
+        print(f"  → ❓ Disambiguation included in summary")
+    else:
+        print(f"  → ⚠️  No pricing data in summary")
     
     # Build ReACT prompt
     prompt = build_react_prompt(
@@ -314,8 +423,13 @@ async def react_responder_node(state: Dict[str, Any]) -> Dict[str, Any]:
         print(f"  ✅ ReACT response generated ({len(final_response)} characters)")
         print(f"{'='*60}\n")
         
+        # CRITICAL: Add AI message to messages list for proper storage
+        # With add_messages reducer, return only the NEW message to append
+        ai_message = AIMessage(content=final_response)
+        
         return {
             **state,
+            "messages": [ai_message],  # Reducer will append this to existing messages
             "final_response": final_response
         }
         
@@ -327,8 +441,13 @@ async def react_responder_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Fallback response
         fallback_response = "I apologize, but I'm having trouble processing your request right now. Could you please try rephrasing your question?"
         
+        # CRITICAL: Add AI message to messages list even for errors
+        # With add_messages reducer, return only the NEW message to append
+        ai_message = AIMessage(content=fallback_response)
+        
         return {
             **state,
+            "messages": [ai_message],  # Reducer will append this to existing messages
             "final_response": fallback_response
         }
 

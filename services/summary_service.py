@@ -45,6 +45,9 @@ class SummaryService:
         Returns:
             List of past session summaries (most recent first)
         """
+        print(f"\n🔍 SUMMARY RETRIEVAL DEBUG:")
+        print(f"  → Looking for summaries for user_id: {user_id}")
+        
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -62,10 +65,13 @@ class SummaryService:
                     LIMIT %s
                 """, (user_id, limit))
                 
+                rows = cur.fetchall()
+                print(f"  → Found {len(rows)} summary rows in database")
+                
                 summaries = []
-                for row in cur.fetchall():
+                for row in rows:
                     metadata = row['metadata'] or {}
-                    summaries.append({
+                    summary_dict = {
                         "session_id": str(row['session_id']),
                         "summary": row['summary'],
                         "topics": metadata.get('topics', []),
@@ -73,7 +79,9 @@ class SummaryService:
                         "intents": metadata.get('intents', []),
                         "created_at": row['created_at'].isoformat(),
                         "session_duration": metadata.get('duration_seconds', 0)
-                    })
+                    }
+                    summaries.append(summary_dict)
+                    print(f"    → Summary: {row['summary'][:80]}...")
                 
                 return summaries
     
@@ -94,16 +102,27 @@ class SummaryService:
         Returns:
             Summary dict with embedding
         """
+        # Check if summary already exists for this session
+        existing_summaries = []
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT summary FROM session_summaries WHERE session_id = %s::uuid
+                """, (session_id,))
+                row = cur.fetchone()
+                if row:
+                    existing_summaries.append(row['summary'])
+        
         # Extract conversation text
         conversation_text = self._format_messages_for_summary(messages)
         
-        # Generate summary using LLM
-        summary = await self._generate_summary(conversation_text)
+        # Generate summary using LLM (with existing summaries for cumulative context)
+        summary = await self._generate_summary(conversation_text, existing_summaries if existing_summaries else None)
         
         # Create embedding
         embedding_vector = await self.embeddings.aembed_query(summary)
         
-        # Store in database
+        # Store in database (upsert)
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -112,7 +131,8 @@ class SummaryService:
                     ON CONFLICT (session_id) DO UPDATE
                     SET summary = EXCLUDED.summary,
                         embedding = EXCLUDED.embedding,
-                        metadata = EXCLUDED.metadata
+                        metadata = EXCLUDED.metadata,
+                        created_at = NOW()
                     RETURNING session_id, summary, created_at
                 """, (
                     session_id,
@@ -147,20 +167,56 @@ class SummaryService:
         
         return "\n".join(formatted)
     
-    async def _generate_summary(self, conversation_text: str) -> str:
-        """Generate summary using LLM"""
+    async def _generate_summary(self, conversation_text: str, existing_summaries: List[str] = None) -> str:
+        """
+        Generate summary using LLM
+        
+        Args:
+            conversation_text: Current conversation text
+            existing_summaries: List of previous summaries to merge (for cumulative context)
+        """
         from langchain_core.messages import SystemMessage, HumanMessage
         
-        prompt = f"""Summarize this customer service conversation in 2-3 sentences.
-Focus on: courses discussed, questions asked, pricing inquiries, and any follow-up needed.
+        # If there are existing summaries, merge them with the new conversation
+        if existing_summaries:
+            summary_context = "\n\n".join([f"Previous Summary {i+1}: {s}" for i, s in enumerate(existing_summaries)])
+            prompt = f"""Analyze and summarize this customer interaction comprehensively.
+
+**Previous Interaction Summaries:**
+{summary_context}
+
+**Current Session:**
+{conversation_text}
+
+Create a consolidated summary that:
+1. Integrates key information from previous interactions
+2. Highlights NEW questions, interests, or behaviors in this session
+3. Identifies buyer intent and confidence (HIGH/MEDIUM/LOW based on engagement signals)
+4. Notes specific courses/services discussed
+5. Flags any follow-up actions needed
+
+Provide a detailed summary in 3-4 sentences:"""
+        else:
+            # First-time summary
+            prompt = f"""Summarize this customer service conversation comprehensively.
 
 Conversation:
 {conversation_text}
 
-Provide a concise summary:"""
+Include in your summary:
+1. All questions asked by the user
+2. Courses/services discussed in detail
+3. Pricing inquiries and quantity/group size mentioned
+4. Buyer intent assessment (HIGH/MEDIUM/LOW) with reasoning based on:
+   - Explicit buying signals (e.g., "I want to enroll", "book me", "sign up")
+   - Engagement depth (asking detailed pricing, comparing options)
+   - Commitment level (specific dates, quantities, payment questions)
+5. Any follow-up needed
+
+Provide a detailed summary in 2-3 sentences:"""
         
         response = await self.summarizer.ainvoke([
-            SystemMessage(content="You are a conversation summarizer."),
+            SystemMessage(content="You are an expert customer service analyst who creates detailed, actionable summaries."),
             HumanMessage(content=prompt)
         ])
         
