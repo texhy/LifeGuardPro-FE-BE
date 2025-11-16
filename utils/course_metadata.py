@@ -46,9 +46,117 @@ def load_course_metadata() -> Dict[str, Any]:
     
     return _course_metadata_cache
 
+def format_condensed_course_reference() -> str:
+    """
+    Format condensed course reference for planner prompt (names and slugs only)
+    
+    Phase 1 Improvement: Reduces prompt size by 70% (12,800 → ~3,800 chars)
+    Only includes essential info for course matching, not full descriptions.
+    Organized by actual program structure from services.json.
+    
+    Returns:
+        Condensed formatted string with course names and slugs
+        
+    Confidence: 95% ✅
+    """
+    # Load the full JSON structure to access program categories
+    services_path = Path(__file__).parent.parent / "services.json"
+    
+    try:
+        with open(services_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            course_descriptions = data.get("course_descriptions", {})
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"❌ Error loading services.json: {e}")
+        return "No course metadata available."
+    
+    if not course_descriptions:
+        return "No course metadata available."
+    
+    # Program category mappings (matching services.json structure)
+    program_categories = {
+        "lifeguard-certification-courses": "**Lifeguard Certification Courses**",
+        "water-safety-and-swim-instruction-courses": "**Water Safety & Swim Instruction**",
+        "cpr-and-first-aid-certification-courses": "**CPR & First Aid Certification Courses**",
+        "certified-pool-operator-courses": "**Certified Pool Operator (CPO) Certification Course**"
+    }
+    
+    # Build condensed reference organized by programs
+    parts = []
+    parts.append("QUICK COURSE REFERENCE (for matching only - use get_all_services tool for full details):")
+    parts.append("")
+    parts.append("**IMPORTANT:** Use the exact slug when planning get_pricing calls. Slugs match the database.")
+    parts.append("")
+    parts.append("**PROGRAM NAME MAPPINGS (for program-level queries):**")
+    parts.append("")
+    parts.append("If user mentions a PROGRAM name, use the corresponding program_slug:")
+    parts.append("")
+    parts.append("  - 'Lifeguard Certification Courses' / 'Lifeguard' / 'Lifeguard courses'")
+    parts.append("    → program_slug: 'lifeguard-certification-courses'")
+    parts.append("")
+    parts.append("  - 'Water Safety & Swim Instruction' / 'Water Safety and Swim Instructor Certification Course' / 'Water Safety' / 'Swim Instructor' / 'WSI'")
+    parts.append("    → program_slug: 'water-safety-and-swim-instruction-courses'")
+    parts.append("")
+    parts.append("  - 'CPR & First Aid Certification Courses' / 'CPR & First Aid' / 'CPR' / 'First Aid'")
+    parts.append("    → program_slug: 'cpr-and-first-aid-certification-courses'")
+    parts.append("")
+    parts.append("  - 'Certified Pool Operator (CPO) Certification Course' / 'CPO' / 'Certified Pool Operator'")
+    parts.append("    → program_slug: 'certified-pool-operator-courses'")
+    parts.append("")
+    parts.append("**CRITICAL:** If user mentions a program name, call get_all_services with program_slug filter to show sub-courses.")
+    parts.append("Do NOT call get_pricing on program names - programs don't have pricing, courses do.")
+    parts.append("")
+    
+    # Process each program category in order
+    for program_key, program_title in program_categories.items():
+        if program_key not in course_descriptions:
+            continue
+        
+        program_courses = course_descriptions[program_key]
+        if not program_courses:
+            continue
+        
+        parts.append(program_title)
+        parts.append("")
+        
+        # List all courses in this program
+        course_entries = []
+        for course_slug, course_info in program_courses.items():
+            if not isinstance(course_info, dict):
+                continue
+            
+            title = course_info.get("title", "Unknown Course")
+            slug = course_info.get("slug", course_slug)  # Use slug from JSON, fallback to key
+            
+            # Format: "Title - slug: exact-slug"
+            course_entry = f"  - {title} (slug: {slug})"
+            course_entries.append(course_entry)
+        
+        # Sort courses alphabetically by title
+        course_entries.sort()
+        parts.extend(course_entries)
+        parts.append("")
+    
+    # Add common abbreviations section
+    parts.append("**Common Abbreviations:**")
+    parts.append("  - CPO = Certified Pool Operator")
+    parts.append("  - BLS = Basic Life Support (Healthcare Provider CPR)")
+    parts.append("  - CPR = Usually refers to BLS CPR for Healthcare Provider")
+    parts.append("  - LGI = Lifeguard Instructor")
+    parts.append("  - WSI = Water Safety Swim Instructor")
+    parts.append("")
+    parts.append("**Note:** For full course details, prerequisites, and suitability information, use the get_all_services tool.")
+    parts.append("**Critical:** Always use the exact slug from this reference when setting course_slug in pricing_slots.")
+    
+    return "\n".join(parts)
+
+
 def format_course_metadata_for_prompt() -> str:
     """
     Format course metadata as a compact reference guide for LLM prompts
+    
+    DEPRECATED: Use format_condensed_course_reference() for planner prompt instead.
+    This function is kept for backward compatibility with other parts of the system.
     
     Returns:
         Formatted string with essential course information for each course

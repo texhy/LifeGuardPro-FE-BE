@@ -49,7 +49,7 @@ async def get_all_services(buyer_category: Optional[str] = None) -> str:
                 # Query all programs with their courses
                 query = """
                     SELECT 
-                        p.program_id,
+                        p.program_id, 
                         p.title as program_title,
                         p.slug as program_slug,
                         c.course_id,

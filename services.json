@@ -1,5 +1,6 @@
 {
     "course_descriptions": {
+      "lifeguard-certification-courses": {
       "junior-lifeguard": {
         "slug": "junior-lifeguard",
         "title": "Junior Lifeguard",
@@ -97,7 +98,9 @@
         "not_suitable_for": ["open water beaches"],
         "what_you_learn": "All deep pool skills plus camp policies, ratios, documentation and incident management",
         "certification_validity": "12 months"
-      },
+      }
+    },
+    "water-safety-and-swim-instruction-courses": {
       "waterfront-lifeguard": {
         "slug": "waterfront-lifeguard",
         "title": "Waterfront Lifeguard",
@@ -349,7 +352,8 @@
         "not_suitable_for": ["professional lifeguards"],
         "what_you_learn": "Updated safety guidelines, situational awareness, prevention strategies",
         "certification_validity": "12 months"
-      },
+      }},
+      "cpr-and-first-aid-certification-courses": {
       "bls-cpr-for-healthcare-provider": {
         "slug": "bls-cpr-for-healthcare-provider",
         "title": "BLS CPR for Healthcare Provider",
@@ -545,7 +549,8 @@
         "not_suitable_for": ["non-instructors"],
         "what_you_learn": "Curriculum updates, evaluation standards, QA practices",
         "certification_validity": "12 months"
-      },
+      }},
+      "certified-pool-operator-courses": {
       "certified-pool-operator-cpo": {
         "slug": "certified-pool-operator-cpo",
         "title": "Certified Pool Operator (CPO)",
@@ -559,7 +564,7 @@
         "not_suitable_for": ["lifeguard-only candidates"],
         "what_you_learn": "Water chemistry, filtration, code compliance, recordkeeping, risk management",
         "certification_validity": "12 months"
-      }
+      }}
     }
-  }
+}
   

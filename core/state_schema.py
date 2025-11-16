@@ -206,6 +206,11 @@ class ConversationState(TypedDict, total=False):
     notes: List[str]  # Planner hints, error simulations, etc.
     planner_errors: List[str]  # JSON parse errors, validation errors
     
+    # Phase 2: Ambiguity resolution fields
+    ambiguous_matches: List[Dict[str, str]]  # [{title: str, slug: str}, ...] - For storing course options when ambiguous
+    selected_course_slug: Optional[str]  # User's selected course slug after disambiguation
+    program_slug: Optional[str]  # Program slug for filtered get_all_services calls
+    
     # Tool results (Phase 2+)
     tool_results: Dict[str, Any]  # {tool_name: result}
     execution_errors: List[str]  # Errors during tool execution
@@ -458,6 +463,30 @@ def merge_planner_output(
     if "planner_errors" in planner_output:
         existing_errors = new_state.get("planner_errors", [])
         new_state["planner_errors"] = (existing_errors + planner_output["planner_errors"])[-10:]
+    
+    # Cross-slot inference: Propagate buyer_category across slots
+    # buyer_category is a global preference - once set, reuse it
+    buyer_category = None
+    
+    # Check pricing_slots
+    if new_state.get("pricing_slots", {}).get("buyer_category"):
+        buyer_category = new_state["pricing_slots"]["buyer_category"]
+    
+    # Check all_services_slots
+    if not buyer_category and new_state.get("all_services_slots", {}).get("buyer_category"):
+        buyer_category = new_state["all_services_slots"]["buyer_category"]
+    
+    # Propagate to both slots if found (ensures consistency)
+    if buyer_category:
+        # Ensure slots exist
+        if "pricing_slots" not in new_state:
+            new_state["pricing_slots"] = {}
+        if "all_services_slots" not in new_state:
+            new_state["all_services_slots"] = {}
+        
+        # Set buyer_category in both slots
+        new_state["pricing_slots"]["buyer_category"] = buyer_category
+        new_state["all_services_slots"]["buyer_category"] = buyer_category
     
     # Update metadata
     new_state["turn_count"] = state.get("turn_count", 0) + 1

@@ -36,7 +36,12 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
     Execute pricing tool - Looks up course pricing in database
     
     Args:
-        args: {course_name: str, quantity: int, buyer_category: str (optional)}
+        args: {
+            course_name: str (optional, if course_slug not provided),
+            course_slug: str (optional, preferred over course_name),
+            quantity: int,
+            buyer_category: str (optional)
+        }
         state: Current conversation state
         
     Returns:
@@ -45,8 +50,9 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
     try:
         print(f"  💰 Calling get_pricing tool...")
         
-        # Extract arguments (support both 'course_name' and 'course' keys)
-        course_name = args.get("course_name") or args.get("course")
+        # Extract arguments - prioritize course_slug over course_name
+        course_slug = args.get("course_slug")
+        course_name = args.get("course_name") or args.get("course")  # Support legacy 'course' key
         quantity = args.get("quantity", 1)
         
         # Get buyer_category from args, state, or infer from quantity
@@ -58,12 +64,12 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
             # Infer from quantity
             buyer_category = "individual" if quantity == 1 else "employer_or_instructor"
         
-        # Validate required arguments
-        if not course_name:
+        # Validate that at least one identifier is provided
+        if not course_slug and not course_name:
             return {
                 "success": False,
                 "data": None,
-                "error": "Missing required argument: course_name"
+                "error": "Missing required argument: either course_slug or course_name must be provided"
             }
         
         # Validate quantity
@@ -74,12 +80,21 @@ async def execute_pricing(args: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
         except (ValueError, TypeError):
             quantity = 1
         
-        # Call the actual tool
-        result = await get_pricing.ainvoke({
-            "course_name": course_name,
+        # Build tool arguments - prioritize course_slug
+        tool_args = {
             "quantity": quantity,
             "buyer_category": buyer_category
-        })
+        }
+        
+        if course_slug:
+            tool_args["course_slug"] = course_slug
+            print(f"     Using course_slug: {course_slug}")
+        else:
+            tool_args["course_name"] = course_name
+            print(f"     Using course_name: {course_name}")
+        
+        # Call the actual tool
+        result = await get_pricing.ainvoke(tool_args)
         
         # Check if result is a disambiguation message (contains emoji or specific patterns)
         # Also check if it's actual pricing (has $ or 💰 emoji)
@@ -123,7 +138,10 @@ async def execute_all_services(args: Dict[str, Any], state: Dict[str, Any]) -> D
     Execute get_all_services tool - Retrieves ALL services hierarchically
     
     Args:
-        args: {buyer_category: str (optional)}
+        args: {
+            buyer_category: str (optional),
+            program_slug: str (optional) - Filter by program
+        }
         state: Current conversation state
         
     Returns:
@@ -141,10 +159,21 @@ async def execute_all_services(args: Dict[str, Any], state: Dict[str, Any]) -> D
             # Try to get from state all_services_slots
             buyer_category = state.get("all_services_slots", {}).get("buyer_category")
         
+        # Get program_slug from args or state (for filtered queries)
+        program_slug = args.get("program_slug")
+        if not program_slug:
+            program_slug = state.get("program_slug")
+        
+        # Build tool arguments
+        tool_args = {}
+        if buyer_category:
+            tool_args["buyer_category"] = buyer_category
+        if program_slug:
+            tool_args["program_slug"] = program_slug
+            print(f"     Filtering by program_slug: {program_slug}")
+        
         # Call the actual tool
-        result = await get_all_services.ainvoke({
-            "buyer_category": buyer_category
-        })
+        result = await get_all_services.ainvoke(tool_args)
         
         print(f"  ✅ All services tool returned: {len(result)} characters")
         

@@ -16,7 +16,12 @@ from config.database import get_connection
 from typing import Optional
 
 @tool
-async def get_pricing(course_name: str, quantity: int = 1, buyer_category: Optional[str] = None) -> str:
+async def get_pricing(
+    course_name: Optional[str] = None,
+    course_slug: Optional[str] = None,
+    quantity: int = 1,
+    buyer_category: Optional[str] = None
+) -> str:
     """
     Get pricing information for a LifeGuard-Pro course.
     
@@ -26,8 +31,11 @@ async def get_pricing(course_name: str, quantity: int = 1, buyer_category: Optio
     - Specific quantities ("for 10 students")
     
     Args:
-        course_name: Name of the course (fuzzy match supported)
+        course_name: Name of the course (fuzzy match supported, optional if course_slug provided)
             Examples: "Junior Lifeguard", "CPR", "BLS", "First Aid"
+        course_slug: Exact course slug for direct lookup (optional, preferred over course_name)
+            Examples: "junior-lifeguard", "swimming-pool-lifeguard-max-depth-12-ft"
+            If provided, skips fuzzy matching and uses direct database lookup (faster, no ambiguity)
         quantity: Number of students (default: 1)
             - 1 = individual pricing
             - 2+ = group pricing (shows all applicable tiers)
@@ -37,55 +45,89 @@ async def get_pricing(course_name: str, quantity: int = 1, buyer_category: Optio
         str: Formatted pricing information with options
     
     Examples:
-        get_pricing("Junior Lifeguard", 1)
+        get_pricing(course_slug="junior-lifeguard", quantity=1)
         → Individual price: $125.00
         
-        get_pricing("CPR", 10)
+        get_pricing(course_name="CPR", quantity=10)
         → Group pricing for 10 students with options 4A and 4B
     """
     try:
-        print(f"💰 Pricing Tool: Looking up '{course_name}' for {quantity} student(s)")
+        # Validate that at least one identifier is provided
+        if not course_slug and not course_name:
+            return "❌ Either course_name or course_slug must be provided"
         
         # Determine buyer_category if not provided
         if not buyer_category:
             buyer_category = "individual" if quantity == 1 else "employer_or_instructor"
         
         # ================================================================
-        # 1. FIND COURSE (using intelligent multi-source matcher)
+        # 1. FIND COURSE (priority: course_slug > course_name)
         # ================================================================
-        from utils.course_matcher import match_course_with_disambiguation
-        from utils.disambiguation_generator import generate_disambiguation_message
         
-        match_result = match_course_with_disambiguation(
-            query=course_name,
-            buyer_category=buyer_category,
-            require_single_match=True  # Need exact match for pricing
-        )
+        course_id = None
+        course_title = None
+        course_sku = None
         
-        # Check if disambiguation needed
-        if match_result["needs_disambiguation"]:
-            print(f"  ❓ Multiple courses found ({match_result['total_matches']} matches), generating disambiguation...")
+        if course_slug:
+            # Direct lookup by slug (fast, no ambiguity)
+            print(f"💰 Pricing Tool: Looking up by slug '{course_slug}' for {quantity} student(s)")
             
-            # Generate LLM-based disambiguation message
-            disambiguation_msg = await generate_disambiguation_message(
-                user_query=course_name,
-                matches_by_program=match_result["matches_by_program"],
-                buyer_category=buyer_category
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT course_id, title, sku
+                        FROM courses
+                        WHERE slug = %s AND active = true
+                    """, (course_slug,))
+                    
+                    course = cur.fetchone()
+                    
+                    if not course:
+                        return f"❌ Course not found: slug '{course_slug}'\n\nPlease verify the course slug is correct."
+                    
+                    course_id = course['course_id']
+                    course_title = course['title']
+                    course_sku = course.get('sku') or 'N/A'
+                    
+                    print(f"  ✅ Direct match: {course_title} (SKU: {course_sku})")
+        
+        elif course_name:
+            # Fuzzy matching logic (existing behavior)
+            print(f"💰 Pricing Tool: Looking up '{course_name}' for {quantity} student(s)")
+            
+            from utils.course_matcher import match_course_with_disambiguation
+            from utils.disambiguation_generator import generate_disambiguation_message
+            
+            match_result = match_course_with_disambiguation(
+                query=course_name,
+                buyer_category=buyer_category,
+                require_single_match=True  # Need exact match for pricing
             )
             
-            return disambiguation_msg
-        
-        # No match found
-        if not match_result["success"] or not match_result["best_match"]:
-            return f"❌ Course not found: '{course_name}'\n\nTry: 'Lifeguard', 'CPR', 'First Aid', 'Water Safety', etc.\n\nTip: Use rag_search to explore available courses first!"
-        
-        # Got single match - use it
-        best_match = match_result["best_match"]
-        course_id = best_match["course_id"]
-        course_title = best_match["canonical_title"]
-        course_sku = best_match.get("sku") or 'N/A'
-        
-        print(f"  ✅ Matched: {course_title} (score: {best_match['match_score']:.2f}, SKU: {course_sku})")
+            # Check if disambiguation needed
+            if match_result["needs_disambiguation"]:
+                print(f"  ❓ Multiple courses found ({match_result['total_matches']} matches), generating disambiguation...")
+                
+                # Generate LLM-based disambiguation message
+                disambiguation_msg = await generate_disambiguation_message(
+                    user_query=course_name,
+                    matches_by_program=match_result["matches_by_program"],
+                    buyer_category=buyer_category
+                )
+                
+                return disambiguation_msg
+            
+            # No match found
+            if not match_result["success"] or not match_result["best_match"]:
+                return f"❌ Course not found: '{course_name}'\n\nTry: 'Lifeguard', 'CPR', 'First Aid', 'Water Safety', etc.\n\nTip: Use rag_search to explore available courses first!"
+            
+            # Got single match - use it
+            best_match = match_result["best_match"]
+            course_id = best_match["course_id"]
+            course_title = best_match["canonical_title"]
+            course_sku = best_match.get("sku") or 'N/A'
+            
+            print(f"  ✅ Matched: {course_title} (score: {best_match['match_score']:.2f}, SKU: {course_sku})")
         
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -118,85 +160,68 @@ async def get_pricing(course_name: str, quantity: int = 1, buyer_category: Optio
                 related_courses = cur.fetchall()
                 
                 # ================================================================
-                # 2. GET PRICING BASED ON QUANTITY
+                # 2. GET PRICING BASED ON QUANTITY AND BUYER CATEGORY
                 # ================================================================
                 
+                # Get individual price first (needed for both individual and family purchases)
+                cur.execute("""
+                    SELECT unit_price, currency, effective_from, effective_to
+                    FROM price_individual
+                    WHERE course_id = %s
+                      AND effective_from <= CURRENT_DATE
+                      AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
+                    ORDER BY effective_from DESC
+                    LIMIT 1
+                """, (course_id,))
+                
+                individual_price = cur.fetchone()
+                
+                if not individual_price:
+                    return f"⚠️  No current pricing available for **{course_title}**\n\nPlease contact LifeGuard-Pro for pricing information."
+                
+                unit_price = float(individual_price['unit_price'])
+                currency = individual_price['currency']
+                
+                # Determine pricing logic based on quantity and buyer_category
                 if quantity == 1:
-                    # INDIVIDUAL PRICING
-                    cur.execute("""
-                        SELECT unit_price, currency, effective_from, effective_to
-                        FROM price_individual
-                        WHERE course_id = %s
-                          AND effective_from <= CURRENT_DATE
-                          AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
-                        ORDER BY effective_from DESC
-                        LIMIT 1
-                    """, (course_id,))
-                    
-                    price = cur.fetchone()
-                    
-                    if price:
-                        result = f"""💰 **{course_title}**
+                    # ================================================================
+                    # CASE 1: INDIVIDUAL (quantity = 1)
+                    # ================================================================
+                    result = f"""💰 **{course_title}**
 SKU: {course_sku}
 
-**Individual Price:** ${price['unit_price']:.2f} {price['currency']} per person
+**Individual Price:** ${unit_price:.2f} {currency} per person
 
 💡 **Group Pricing:** For 2 or more students, group discounts are available!
    Ask: "What's the price for [X] students for {course_title}?"
 
 📚 **To Register:** Use rag_search to find registration links and course details."""
-                        
-                        # Add related courses info if available
-                        if parent_program and related_courses:
-                            result += f"""
-
----
-
-📋 **Related Courses in {parent_program['program_title']}:**
-
-"""
-                            for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
-                                result += f"{idx}. **{rel_course['course_title']}**"
-                                if rel_course.get('short_title'):
-                                    result += f" ({rel_course['short_title']})"
-                                result += "\n"
-                            
-                            if len(related_courses) > 10:
-                                result += f"\n_... and {len(related_courses) - 10} more courses in this program_"
-                            
-                            result += f"\n💡 Ask me about pricing or details for any of these courses!"
-                        
-                        print(f"  ✅ Individual price: ${price['unit_price']:.2f}")
-                        if related_courses:
-                            print(f"  📋 Found {len(related_courses)} related courses in parent program")
-                        return result
-                    else:
-                        error_msg = f"⚠️  No current individual pricing available for **{course_title}**\n\nPlease contact LifeGuard-Pro for pricing information."
-                        
-                        # Add related courses info even for errors
-                        if parent_program and related_courses:
-                            error_msg += f"""
-
----
-
-📋 **Related Courses in {parent_program['program_title']}:**
-
-"""
-                            for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
-                                error_msg += f"{idx}. **{rel_course['course_title']}**"
-                                if rel_course.get('short_title'):
-                                    error_msg += f" ({rel_course['short_title']})"
-                                error_msg += "\n"
-                            
-                            if len(related_courses) > 10:
-                                error_msg += f"\n_... and {len(related_courses) - 10} more courses in this program_"
-                            
-                            error_msg += f"\n💡 Ask me about pricing or details for any of these courses!"
-                        
-                        return error_msg
+                    
+                    print(f"  ✅ Individual price: ${unit_price:.2f}")
                 
-                else:
-                    # GROUP PRICING (tiered)
+                elif buyer_category == "individual" and quantity <= 3:
+                    # ================================================================
+                    # CASE 2: FAMILY PURCHASE (individual, quantity 2-3)
+                    # ================================================================
+                    total_price = unit_price * quantity
+                    
+                    result = f"""💰 **{course_title}**
+SKU: {course_sku}
+
+**Family Purchase ({quantity} tickets):**
+• ${unit_price:.2f} {currency} per person × {quantity} = **${total_price:.2f} {currency} total**
+
+💡 **Note:** This is individual pricing. For larger groups (4+ students) or organizations, group discounts with 4A/4B options are available!
+
+📚 **To Register:** Use rag_search to find registration links and course details."""
+                    
+                    print(f"  ✅ Family purchase: ${unit_price:.2f} × {quantity} = ${total_price:.2f}")
+                
+                elif buyer_category == "employer_or_instructor" and quantity >= 2:
+                    # ================================================================
+                    # CASE 3: ORGANIZATION/INSTRUCTOR (quantity >= 2, use group pricing with 4A/4B)
+                    # ================================================================
+                    # Get group pricing tiers that match the quantity
                     cur.execute("""
                         SELECT 
                             pg.price_option,
@@ -238,7 +263,15 @@ SKU: {course_sku}
                             total_price = tier['unit_price'] * quantity
                             qty_range = f"{tier['min_qty']}-{tier['max_qty'] or '∞'}"
                             
-                            result += f"""**Option {option}:** ${tier['unit_price']:.2f} per person (for {qty_range} students)
+                            # Add option label
+                            if option == "4A":
+                                option_label = "Option 4A - Materials Only (You Provide Instructor)"
+                            elif option == "4B":
+                                option_label = "Option 4B - Full Service (We Provide Instructor)"
+                            else:
+                                option_label = f"Option {option}"
+                            
+                            result += f"""**{option_label}:** ${tier['unit_price']:.2f} per person (for {qty_range} students)
    • ${tier['unit_price']:.2f} × {quantity} students = **${total_price:.2f} {tier['currency']} total**
 
 """
@@ -250,30 +283,8 @@ SKU: {course_sku}
                         
                         result += f"📚 **To Register:** Use rag_search to find registration details and course information."
                         
-                        # Add related courses info if available
-                        if parent_program and related_courses:
-                            result += f"""
-
----
-
-📋 **Related Courses in {parent_program['program_title']}:**
-
-"""
-                            for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
-                                result += f"{idx}. **{rel_course['course_title']}**"
-                                if rel_course.get('short_title'):
-                                    result += f" ({rel_course['short_title']})"
-                                result += "\n"
-                            
-                            if len(related_courses) > 10:
-                                result += f"\n_... and {len(related_courses) - 10} more courses in this program_"
-                            
-                            result += f"\n💡 Ask me about pricing or details for any of these courses!"
-                        
-                        print(f"  ✅ Found {len(matching_tiers)} pricing tier(s) for {quantity} students")
-                        if related_courses:
-                            print(f"  📋 Found {len(related_courses)} related courses in parent program")
-                        return result
+                        print(f"  ✅ Found {len(matching_tiers)} pricing tier(s) for {quantity} students (4A/4B options)")
+                    
                     else:
                         # No matching tier, show all available tiers
                         cur.execute("""
@@ -307,7 +318,14 @@ SKU: {course_sku}
                                 options[option].append(tier)
                             
                             for option, tiers in sorted(options.items()):
-                                result += f"**Option {option}:**\n"
+                                if option == "4A":
+                                    option_label = "Option 4A - Materials Only"
+                                elif option == "4B":
+                                    option_label = "Option 4B - Full Service"
+                                else:
+                                    option_label = f"Option {option}"
+                                
+                                result += f"**{option_label}:**\n"
                                 for tier in tiers[:3]:  # Show first 3 tiers
                                     qty_range = f"{tier['min_qty']}-{tier['max_qty'] or '∞'}"
                                     result += f"  • {qty_range} students: ${tier['unit_price']:.2f} per person\n"
@@ -316,9 +334,54 @@ SKU: {course_sku}
                                 result += "\n"
                             
                             result += "💡 Contact LifeGuard-Pro for custom pricing or larger groups."
-                            return result
+                            print(f"  ⚠️  No exact tier for {quantity} students, showing available tiers")
                         else:
-                            return f"⚠️  No group pricing available for **{course_title}**\n\nPlease contact LifeGuard-Pro for group pricing information."
+                            result = f"⚠️  No group pricing available for **{course_title}**\n\nPlease contact LifeGuard-Pro for group pricing information."
+                            print(f"  ⚠️  No group pricing tiers found")
+                
+                else:
+                    # ================================================================
+                    # CASE 4: DEFAULT FALLBACK (buyer_category not specified, quantity >= 2)
+                    # ================================================================
+                    # Default to individual pricing calculation
+                    total_price = unit_price * quantity
+                    
+                    result = f"""💰 **{course_title}**
+SKU: {course_sku}
+
+**Price for {quantity} tickets:**
+• ${unit_price:.2f} {currency} per person × {quantity} = **${total_price:.2f} {currency} total**
+
+💡 **Note:** This is individual pricing. For organizations or larger groups, group discounts with 4A/4B options are available!
+
+📚 **To Register:** Use rag_search to find registration links and course details."""
+                    
+                    print(f"  ✅ Default pricing: ${unit_price:.2f} × {quantity} = ${total_price:.2f}")
+                
+                # Add related courses info if available (for all cases)
+                if parent_program and related_courses:
+                    result += f"""
+
+---
+
+📋 **Related Courses in {parent_program['program_title']}:**
+
+"""
+                    for idx, rel_course in enumerate(related_courses[:10], 1):  # Limit to 10
+                        result += f"{idx}. **{rel_course['course_title']}**"
+                        if rel_course.get('short_title'):
+                            result += f" ({rel_course['short_title']})"
+                        result += "\n"
+                    
+                    if len(related_courses) > 10:
+                        result += f"\n_... and {len(related_courses) - 10} more courses in this program_"
+                    
+                    result += f"\n💡 Ask me about pricing or details for any of these courses!"
+                
+                if related_courses:
+                    print(f"  📋 Found {len(related_courses)} related courses in parent program")
+                
+                return result
     
     except Exception as e:
         print(f"  ❌ Pricing tool error: {e}")
