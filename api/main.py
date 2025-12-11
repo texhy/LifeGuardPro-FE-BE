@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import logging
 import os
 
-from api.routes import chat, session, health
+from api.routes import chat, session, health, email, email_test
 from api.middleware import LoggingMiddleware, RateLimitMiddleware
 from config.settings import settings
 from config.database import test_connection
@@ -66,6 +66,8 @@ app.add_middleware(RateLimitMiddleware, max_requests=100, window_seconds=60)
 app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 app.include_router(session.router, prefix="/api/v1/session", tags=["Session"])
 app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"])
+app.include_router(email.router, tags=["Email"])  # Root level for n8n integration
+app.include_router(email_test.router, prefix="/api", tags=["Email Test"])  # Test endpoint for email classification
 
 @app.get("/")
 async def root():
